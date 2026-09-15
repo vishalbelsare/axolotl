@@ -1,11 +1,12 @@
 """chatml prompt tokenization strategy for ORPO"""
+
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from pydantic import BaseModel
 
 from axolotl.prompt_tokenizers import IGNORE_INDEX, PromptTokenizingStrategy
 from axolotl.prompters import Prompter
-from axolotl.utils.chat_templates import chat_templates
+from axolotl.utils.chat_templates import get_chat_template_from_config
 
 
 class Message(BaseModel):
@@ -22,24 +23,17 @@ class MessageList(BaseModel):
     messages: List[Message]
 
 
-def load(
-    tokenizer, cfg, ds_cfg: Optional[Dict[str, Any]] = None, **kwargs
-):  # pylint: disable=possibly-unused-variable,unused-argument
+def load(tokenizer, cfg, ds_cfg: Optional[Dict[str, Any]] = None, **kwargs):
     """
     chatml transforms for datasets with system, input, chosen, rejected
     """
-
-    chat_template = chat_templates("chatml")
-    if ds_cfg and "chat_template" in ds_cfg:
-        chat_template = ds_cfg["chat_template"]
-        try:
-            chat_template = chat_templates(chat_template)
-        except ValueError:
-            pass
-    tokenizer.chat_template = chat_template
+    chat_template_string = get_chat_template_from_config(
+        cfg=cfg, ds_cfg=ds_cfg, tokenizer=tokenizer
+    )
+    tokenizer.chat_template = chat_template_string
 
     return ORPOTokenizingStrategy(
-        ORPOPrompter(chat_template, tokenizer),
+        ORPOPrompter(chat_template_string, tokenizer),
         tokenizer,
         cfg.train_on_inputs,
         cfg.sequence_len,
@@ -136,7 +130,7 @@ class ORPODatasetParsingStrategy:
 
 class ORPOTokenizingStrategy(PromptTokenizingStrategy):
     """
-    rejected_input_ids
+    rejected_ids
     input_ids
     rejected_attention_mask
     attention_mask
@@ -175,7 +169,7 @@ class ORPOTokenizingStrategy(PromptTokenizingStrategy):
                 labels += [IGNORE_INDEX] * (len(input_ids) - prev_idx)
                 prompt_len = len(input_ids)
         # remap the input_ids, attention_mask and labels
-        rejected_input_ids = input_ids
+        rejected_ids = input_ids
         rejected_labels = labels
         # pass the chosen prompt/row to the Prompter to get the formatted prompt
         chosen_message_list: MessageList = (
@@ -197,7 +191,7 @@ class ORPOTokenizingStrategy(PromptTokenizingStrategy):
                 labels += [IGNORE_INDEX] * (len(input_ids) - prev_idx)
 
         return {
-            "rejected_input_ids": rejected_input_ids,
+            "rejected_ids": rejected_ids,
             "rejected_labels": rejected_labels,
             "rejected_attention_mask": [1] * len(rejected_labels),
             "input_ids": input_ids,
@@ -223,53 +217,64 @@ class ORPOPrompter(Prompter):
         for message in message_list.messages:
             conversation.append(message.model_dump())
             if message.role == "system":
-                yield self.tokenizer.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=False,
-                    chat_template=self.chat_template,
-                    tokenize=False,
-                ), False
+                yield (
+                    self.tokenizer.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=False,
+                        chat_template=self.chat_template,
+                        tokenize=False,
+                    ),
+                    False,
+                )
             if message.role == "user":
-                yield self.tokenizer.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    chat_template=self.chat_template,
-                    tokenize=False,
-                ), False
+                yield (
+                    self.tokenizer.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=True,
+                        chat_template=self.chat_template,
+                        tokenize=False,
+                    ),
+                    False,
+                )
             if message.role == "assistant":
-                yield self.tokenizer.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=False,
-                    chat_template=self.chat_template,
-                    tokenize=False,
-                ), True
+                yield (
+                    self.tokenizer.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=False,
+                        chat_template=self.chat_template,
+                        tokenize=False,
+                    ),
+                    True,
+                )
 
 
-def argilla(cfg, **kwargs):  # pylint: disable=possibly-unused-variable,unused-argument
+def argilla(cfg, **kwargs):
     dataset_parser = ORPODatasetParsingStrategy()
-
-    chat_template_str = chat_templates(cfg.chat_template)
 
     def transform_fn(sample, tokenizer=None):
         res = {}
 
+        chat_template_string = get_chat_template_from_config(
+            cfg=cfg, tokenizer=tokenizer
+        )
+
         res["prompt"] = tokenizer.apply_chat_template(
             [msg.model_dump() for msg in dataset_parser.get_prompt(sample).messages],
             add_generation_prompt=True,
-            chat_template=chat_template_str,
+            chat_template=chat_template_string,
             tokenize=False,
         )
         prompt_str_len = len(res["prompt"])
         res["chosen"] = tokenizer.apply_chat_template(
             [msg.model_dump() for msg in dataset_parser.get_chosen(sample).messages],
             add_generation_prompt=False,
-            chat_template=chat_template_str,
+            chat_template=chat_template_string,
             tokenize=False,
         )[prompt_str_len:]
         res["rejected"] = tokenizer.apply_chat_template(
             [msg.model_dump() for msg in dataset_parser.get_rejected(sample).messages],
             add_generation_prompt=False,
-            chat_template=chat_template_str,
+            chat_template=chat_template_string,
             tokenize=False,
         )[prompt_str_len:]
 

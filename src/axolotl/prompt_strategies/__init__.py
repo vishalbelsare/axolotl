@@ -2,20 +2,38 @@
 
 import importlib
 import inspect
-import logging
 
 from axolotl.prompt_strategies.user_defined import UserDefinedDatasetConfig
+from axolotl.utils.logging import get_logger
 
-LOG = logging.getLogger("axolotl.prompt_strategies")
+LOG = get_logger(__name__)
 
 
 def load(strategy, tokenizer, cfg, ds_cfg, processor=None):
     try:
+        if strategy == "messages":
+            from .messages import load as messages_load
+
+            return messages_load(tokenizer, cfg, ds_cfg, processor=processor)
         load_fn = "load"
-        if strategy.split(".")[-1].startswith("load_"):
+        package = "axolotl.prompt_strategies"
+        if (
+            strategy.split(".")[-1].startswith("load_")
+            or strategy.split(".")[-1] == "load"
+        ):
             load_fn = strategy.split(".")[-1]
             strategy = ".".join(strategy.split(".")[:-1])
-        mod = importlib.import_module(f".{strategy}", "axolotl.prompt_strategies")
+        elif len(strategy.split(".")) > 1:
+            try:
+                importlib.import_module(
+                    "." + strategy.split(".")[-1],
+                    ".".join(strategy.split(".")[:-1]),
+                )
+                package = ".".join(strategy.split(".")[:-1])
+                strategy = strategy.split(".")[-1]
+            except ModuleNotFoundError:
+                pass
+        mod = importlib.import_module(f".{strategy}", package)
         func = getattr(mod, load_fn)
         load_kwargs = {}
         if strategy == "user_defined":
@@ -26,9 +44,10 @@ def load(strategy, tokenizer, cfg, ds_cfg, processor=None):
                 load_kwargs["ds_cfg"] = ds_cfg
             if "processor" in sig.parameters:
                 load_kwargs["processor"] = processor
+
         return func(tokenizer, cfg, **load_kwargs)
     except ModuleNotFoundError:
         return None
-    except Exception as exc:  # pylint: disable=broad-exception-caught
+    except Exception as exc:
         LOG.error(f"Failed to load prompt strategy `{strategy}`: {str(exc)}")
-        return None
+        raise exc
